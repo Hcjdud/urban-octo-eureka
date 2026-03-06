@@ -2,43 +2,61 @@ const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashComma
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 // ============================================
-// ВЕБ-СЕРВЕР ДЛЯ RENDER
+// ВЕБ-СЕРВЕР ДЛЯ RENDER (ОБЯЗАТЕЛЬНО)
 // ============================================
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
-  res.send('Anti-Raid Discord Bot is running!');
+    res.send(`
+        <html>
+            <head><title>Anti-Raid Bot</title></head>
+            <body>
+                <h1>✅ Anti-Raid Bot is running!</h1>
+                <p>Status: ONLINE</p>
+                <p>Time: ${new Date().toLocaleString()}</p>
+            </body>
+        </html>
+    `);
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+    res.status(200).send('OK');
 });
 
+// Запускаем сервер на 0.0.0.0 (ВАЖНО!)
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Веб-сервер запущен на порту ${PORT}`);
+    console.log(`✅ [SERVER] Веб-сервер запущен на порту ${PORT}`);
 });
 
 // ============================================
-// КОНФИГУРАЦИЯ
+// ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
 // ============================================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID; // Опционально
 
 if (!BOT_TOKEN) {
-    console.error('❌ ОШИБКА: BOT_TOKEN не найден!');
+    console.error('❌ [ERROR] BOT_TOKEN не найден в переменных окружения!');
     process.exit(1);
 }
 
 if (!CLIENT_ID) {
-    console.error('❌ ОШИБКА: CLIENT_ID не найден!');
+    console.error('❌ [ERROR] CLIENT_ID не найден в переменных окружения!');
     process.exit(1);
 }
 
+console.log('✅ [ENV] Переменные окружения загружены');
+console.log(`   CLIENT_ID: ${CLIENT_ID}`);
+if (GUILD_ID) console.log(`   GUILD_ID: ${GUILD_ID}`);
+
+// ============================================
+// НАСТРОЙКА ПРЕФИКСА
+// ============================================
 const PREFIX = '!';
-const GUILD_ID = process.env.GUILD_ID;
 
 // ============================================
 // СОЗДАНИЕ DISCORD КЛИЕНТА
@@ -72,19 +90,27 @@ const antiRaid = {
 // ============================================
 // ФУНКЦИЯ РЕГИСТРАЦИИ СЛЕШ-КОМАНД
 // ============================================
-async function registerSlashCommands() {
+async function registerCommands() {
     try {
-        console.log('🔄 Регистрация слеш-команд...');
+        console.log('🔄 [CMDS] Регистрация слеш-команд...');
 
         const commands = [
             new SlashCommandBuilder()
+                .setName('ping')
+                .setDescription('Проверка работы бота'),
+            
+            new SlashCommandBuilder()
+                .setName('help')
+                .setDescription('Показать список команд'),
+            
+            new SlashCommandBuilder()
                 .setName('antiraid')
                 .setDescription('Управление анти-рейд защитой')
-                .addSubcommand(sub =>
+                .addSubcommand(sub => 
                     sub.setName('on').setDescription('Включить защиту'))
-                .addSubcommand(sub =>
+                .addSubcommand(sub => 
                     sub.setName('off').setDescription('Выключить защиту'))
-                .addSubcommand(sub =>
+                .addSubcommand(sub => 
                     sub.setName('status').setDescription('Показать статус защиты'))
                 .addSubcommand(sub =>
                     sub.setName('set')
@@ -100,13 +126,13 @@ async function registerSlashCommands() {
                                 ))
                         .addIntegerOption(opt =>
                             opt.setName('threshold')
-                                .setDescription('Пороговое значение')
+                                .setDescription('Пороговое значение (1-50)')
                                 .setRequired(true)
                                 .setMinValue(1)
                                 .setMaxValue(50))
                         .addIntegerOption(opt =>
                             opt.setName('window')
-                                .setDescription('Временное окно (секунды)')
+                                .setDescription('Временное окно в секундах (1-300)')
                                 .setRequired(true)
                                 .setMinValue(1)
                                 .setMaxValue(300))),
@@ -118,21 +144,6 @@ async function registerSlashCommands() {
                     sub.setName('create').setDescription('Создать бэкап сервера'))
                 .addSubcommand(sub =>
                     sub.setName('list').setDescription('Показать список бэкапов'))
-                .addSubcommand(sub =>
-                    sub.setName('restore')
-                        .setDescription('Восстановить сервер из бэкапа')
-                        .addStringOption(opt =>
-                            opt.setName('backup_id')
-                                .setDescription('ID бэкапа (оставьте пустым для последнего)')
-                                .setRequired(false))),
-            
-            new SlashCommandBuilder()
-                .setName('ping')
-                .setDescription('Проверка работоспособности бота'),
-            
-            new SlashCommandBuilder()
-                .setName('help')
-                .setDescription('Показать список команд')
         ];
 
         const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -143,68 +154,71 @@ async function registerSlashCommands() {
                 Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
                 { body: commands }
             );
-            console.log(`✅ Слеш-команды зарегистрированы на сервере ${GUILD_ID}`);
+            console.log(`✅ [CMDS] Команды зарегистрированы на сервере ${GUILD_ID}`);
         } else {
             // Глобальная регистрация (до 1 часа)
             await rest.put(
                 Routes.applicationCommands(CLIENT_ID),
                 { body: commands }
             );
-            console.log('✅ Слеш-команды зарегистрированы глобально');
+            console.log('✅ [CMDS] Команды зарегистрированы глобально');
         }
     } catch (error) {
-        console.error('❌ Ошибка регистрации слеш-команд:', error);
+        console.error('❌ [CMDS] Ошибка регистрации команд:', error.message);
     }
 }
 
 // ============================================
-// ФУНКЦИЯ ДЛЯ ПОДДЕРЖАНИЯ ЗЕЛЕНОГО СТАТУСА
+// ФУНКЦИЯ ПОДДЕРЖАНИЯ СТАТУСА
 // ============================================
-function keepBotOnline() {
+function keepAlive() {
     // Устанавливаем начальный статус
     client.user.setStatus('online');
     client.user.setActivity('запуск...', { type: ActivityType.Playing });
     
-    // Меняем активность каждые 30 секунд для поддержания "активности"
     const activities = [
         { name: 'за сервером', type: ActivityType.Watching },
         { name: 'анти-рейд защиту', type: ActivityType.Playing },
         { name: `${client.guilds.cache.size} серверов`, type: ActivityType.Watching },
-        { name: 'рейдеров', type: ActivityType.Watching }
+        { name: 'команды /help', type: ActivityType.Listening }
     ];
     
     let index = 0;
     
-    // Интервал обновления активности
+    // Обновляем активность каждые 30 секунд
     setInterval(() => {
         try {
-            // Явно устанавливаем статус онлайн (зеленый кружок)
             client.user.setStatus('online');
-            
-            // Обновляем активность
             client.user.setActivity(activities[index].name, { 
                 type: activities[index].type 
             });
-            
             index = (index + 1) % activities.length;
-            
-            // Необязательно: логируем для отладки (можно закомментировать)
-            // console.log(`🔄 Статус обновлен: ${activities[index].name}`);
+            console.log(`🔄 [STATUS] Активность обновлена`);
         } catch (error) {
-            console.error('Ошибка при обновлении статуса:', error);
+            console.error('❌ [STATUS] Ошибка обновления статуса:', error.message);
         }
-    }, 30000); // Каждые 30 секунд
+    }, 30000);
     
-    // Дополнительный пинг каждые 5 минут для поддержания соединения
+    // Пинг каждые 5 минут для поддержания соединения
     setInterval(() => {
         try {
-            // Просто пингуем Discord API
             const ping = client.ws.ping;
-            console.log(`🏓 WebSocket ping: ${ping}ms`);
+            console.log(`🏓 [PING] WebSocket ping: ${ping}ms`);
         } catch (error) {
-            console.error('Ошибка при пинге:', error);
+            console.error('❌ [PING] Ошибка пинга:', error.message);
         }
-    }, 300000); // Каждые 5 минут
+    }, 300000);
+    
+    // Самопинг каждые 10 минут через HTTP (чтобы Render не усыплял)
+    setInterval(() => {
+        try {
+            axios.get(`http://localhost:${PORT}/health`)
+                .then(() => console.log('🔄 [SELF] Самопинг успешен'))
+                .catch(err => console.log('⚠️ [SELF] Самопинг не удался:', err.message));
+        } catch (error) {
+            // Игнорируем
+        }
+    }, 600000);
 }
 
 // ============================================
@@ -215,26 +229,17 @@ client.on('interactionCreate', async (interaction) => {
 
     const { commandName, options, guild, member } = interaction;
 
-    // Проверка прав для команд управления
-    const adminCommands = ['antiraid', 'backup'];
-    if (adminCommands.includes(commandName)) {
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-            return interaction.reply({ 
-                content: '❌ У вас нет прав администратора для этой команды', 
-                ephemeral: true 
-            });
-        }
-    }
+    console.log(`📨 [CMD] Получена команда: /${commandName} от ${member.user.tag}`);
 
     // Команда /ping
     if (commandName === 'ping') {
         const latency = Date.now() - interaction.createdTimestamp;
         const apiLatency = client.ws.ping;
-        return interaction.reply(
-            `🏓 **Понг!**\n` +
-            `⏱️ Задержка бота: ${latency}ms\n` +
-            `📡 Задержка API: ${apiLatency}ms`
-        );
+        
+        return interaction.reply({ 
+            content: `🏓 **Понг!**\n⏱️ Задержка бота: ${latency}ms\n📡 Задержка API: ${apiLatency}ms`,
+            ephemeral: false
+        });
     }
 
     // Команда /help
@@ -248,13 +253,20 @@ client.on('interactionCreate', async (interaction) => {
             '• `/antiraid set` - настройка параметров\n' +
             '• `/backup create` - создать бэкап\n' +
             '• `/backup list` - список бэкапов\n' +
-            '• `/backup restore` - восстановить из бэкапа\n' +
             '• `/ping` - проверить работу бота\n' +
-            '• `/help` - показать это сообщение\n\n' +
-            '**Префиксные команды:**\n' +
-            '• `!antiraid help` - тоже работают';
+            '• `/help` - показать это сообщение';
         
         return interaction.reply(helpText);
+    }
+
+    // Проверка прав для команд управления
+    if (commandName === 'antiraid' || commandName === 'backup') {
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({ 
+                content: '❌ У вас нет прав администратора для этой команды', 
+                ephemeral: true 
+            });
+        }
     }
 
     // Команда /antiraid
@@ -265,11 +277,11 @@ client.on('interactionCreate', async (interaction) => {
         switch (subcommand) {
             case 'on':
                 antiRaid.enabled.set(guildId, true);
-                return interaction.reply('✅ Анти-рейд защита **включена** на этом сервере');
+                return interaction.reply('✅ Анти-рейд защита **включена**');
 
             case 'off':
                 antiRaid.enabled.set(guildId, false);
-                return interaction.reply('✅ Анти-рейд защита **выключена** на этом сервере');
+                return interaction.reply('✅ Анти-рейд защита **выключена**');
 
             case 'status':
                 const settings = antiRaid.settings.get(guildId) || {
@@ -314,31 +326,13 @@ client.on('interactionCreate', async (interaction) => {
         
         if (subcommand === 'create') {
             await interaction.reply('🔄 Создание бэкапа...');
-            // Здесь будет логика создания бэкапа
+            
             setTimeout(() => {
                 interaction.editReply('✅ Бэкап успешно создан!');
             }, 2000);
         } else if (subcommand === 'list') {
             interaction.reply('📋 Функция списка бэкапов в разработке');
-        } else if (subcommand === 'restore') {
-            const backupId = options.getString('backup_id') || 'последний';
-            interaction.reply(`🔄 Восстановление из бэкапа ${backupId}...\n⚠️ Запрос отправлен владельцу сервера`);
         }
-    }
-});
-
-// ============================================
-// ОБРАБОТКА ПРЕФИКСНЫХ КОМАНД
-// ============================================
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-    if (!message.content.startsWith(PREFIX)) return;
-
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const commandName = args.shift().toLowerCase();
-
-    if (commandName === 'antiraid' && args[0] === 'help') {
-        message.reply('Используйте `/help` для списка всех команд');
     }
 });
 
@@ -366,61 +360,13 @@ client.on('guildMemberAdd', async (member) => {
 
     if (filtered.length >= settings.joinThreshold) {
         antiRaid.stats.raidsDetected++;
-        console.log(`🚨 МАССОВЫЙ ЗАХОД на сервере ${member.guild.name} (${filtered.length} за ${settings.joinWindow} сек)`);
+        console.log(`🚨 [RAID] Массовый заход на сервере ${member.guild.name} (${filtered.length} за ${settings.joinWindow} сек)`);
         try {
             await member.guild.setVerificationLevel(3);
-            console.log(`✅ Уровень проверки повышен для сервера ${member.guild.name}`);
+            console.log(`✅ [RAID] Уровень проверки повышен для сервера ${member.guild.name}`);
         } catch (error) {
-            console.error('Ошибка при повышении уровня проверки:', error.message);
+            console.error('❌ [RAID] Ошибка:', error.message);
         }
-    }
-});
-
-// ============================================
-// ЗАЩИТА ОТ ДЕЙСТВИЙ С РОЛЯМИ
-// ============================================
-client.on('guildRoleCreate', async (role) => {
-    const guildId = role.guild.id;
-    if (!antiRaid.enabled.get(guildId)) return;
-
-    const settings = antiRaid.settings.get(guildId) || { roleThreshold: 3, roleWindow: 5 };
-    
-    try {
-        const auditLogs = await role.guild.fetchAuditLogs({ limit: 1, type: 30 });
-        const log = auditLogs.entries.first();
-        if (!log || log.executor.bot) return;
-
-        const now = Date.now();
-        
-        if (!antiRaid.actionCache.has(guildId)) {
-            antiRaid.actionCache.set(guildId, new Map());
-        }
-
-        const userCache = antiRaid.actionCache.get(guildId);
-        if (!userCache.has(log.executor.id)) {
-            userCache.set(log.executor.id, { roles: [], lastAction: now });
-        }
-
-        const userActions = userCache.get(log.executor.id);
-        userActions.roles.push({ timestamp: now, action: 'create' });
-        userActions.roles = userActions.roles.filter(a => now - a.timestamp < settings.roleWindow * 1000);
-
-        if (userActions.roles.length >= settings.roleThreshold) {
-            antiRaid.stats.raidsDetected++;
-            console.log(`🚨 РОЛЕВОЙ РЕЙД от ${log.executor.tag} на сервере ${role.guild.name}`);
-            
-            try {
-                await role.guild.members.ban(log.executor.id, { 
-                    reason: `Анти-рейд: ${userActions.roles.length} действий с ролями` 
-                });
-                antiRaid.stats.bans++;
-                console.log(`✅ Нарушитель забанен: ${log.executor.tag}`);
-            } catch (e) {
-                console.error('Не удалось забанить нарушителя:', e.message);
-            }
-        }
-    } catch (error) {
-        console.error('Ошибка при проверке ролевых действий:', error.message);
     }
 });
 
@@ -428,34 +374,33 @@ client.on('guildRoleCreate', async (role) => {
 // СОБЫТИЕ ГОТОВНОСТИ БОТА
 // ============================================
 client.once('ready', async () => {
-    console.log(`=================================`);
-    console.log(`✅ БОТ УСПЕШНО ЗАПУЩЕН!`);
-    console.log(`=================================`);
+    console.log('\n=================================');
+    console.log('✅ БОТ УСПЕШНО ЗАПУЩЕН!');
+    console.log('=================================');
     console.log(`📊 Информация:`);
     console.log(`   Имя бота: ${client.user.tag}`);
     console.log(`   ID бота: ${client.user.id}`);
     console.log(`   Серверов: ${client.guilds.cache.size}`);
     console.log(`   Пользователей: ${client.users.cache.size}`);
-    console.log(`=================================`);
+    console.log('=================================\n');
     
-    // РЕГИСТРИРУЕМ СЛЕШ-КОМАНДЫ ПОСЛЕ ЗАПУСКА БОТА
-    await registerSlashCommands();
+    // РЕГИСТРИРУЕМ КОМАНДЫ
+    await registerCommands();
     
-    // ЗАПУСКАЕМ ФУНКЦИЮ ПОДДЕРЖАНИЯ ЗЕЛЕНОГО СТАТУСА
-    keepBotOnline();
+    // ЗАПУСКАЕМ ПОДДЕРЖАНИЕ СТАТУСА
+    keepAlive();
     
-    console.log(`🎯 Статус: ONLINE (зеленый)`);
-    console.log(`=================================`);
+    console.log('🎯 Статус: ONLINE (зеленый)\n');
 });
 
 // ============================================
 // ЗАПУСК БОТА
 // ============================================
-console.log('🔄 Запуск Anti-Raid бота...');
+console.log('\n🔄 Запуск Anti-Raid бота...');
 console.log(`🕐 Время: ${new Date().toLocaleString()}`);
-console.log(`📦 Node.js версия: ${process.version}`);
+console.log(`📦 Node.js версия: ${process.version}\n`);
 
 client.login(BOT_TOKEN).catch(error => {
-    console.error('❌ Ошибка при входе в Discord:', error.message);
+    console.error('❌ [FATAL] Ошибка при входе в Discord:', error.message);
     process.exit(1);
 });
