@@ -1,7 +1,7 @@
 {
     "name": "antiraid-bot",
-    "version": "2.0.0",
-    "description": "Anti-raid Discord bot",
+    "version": "3.0.0",
+    "description": "Anti-raid Discord bot for Render",
     "main": "index.js",
     "scripts": {
         "start": "node index.js"
