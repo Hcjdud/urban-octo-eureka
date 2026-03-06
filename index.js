@@ -1,16 +1,16 @@
-const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder, ActivityType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder, ActivityType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Collection } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
 // ============================================
-// ВЕБ-СЕРВЕР ДЛЯ RENDER
+// ВЕБ-СЕРВЕР ДЛЯ RAILWAY
 // ============================================
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('Anti-Raid Discord Bot is running!');
+  res.send('Anti-Raid Discord Bot is running on Railway 24/7!');
 });
 
 app.get('/health', (req, res) => {
@@ -49,8 +49,7 @@ const client = new Client({
         GatewayIntentBits.GuildModeration,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildPresences
+        GatewayIntentBits.GuildMessageReactions
     ]
 });
 
@@ -58,17 +57,19 @@ const client = new Client({
 // ХРАНИЛИЩЕ ДАННЫХ
 // ============================================
 const antiRaid = {
-    enabled: new Map(),
-    settings: new Map(),
-    joinCache: new Map(),
-    actionCache: new Map(),
-    backups: new Map(),
+    enabled: new Collection(),
+    settings: new Collection(),
+    joinCache: new Collection(),
+    actionCache: new Collection(),
+    backups: new Collection(),
     verification: {
-        enabled: new Map(), // Включена ли верификация на сервере
-        roleId: new Map(), // ID роли после верификации
-        channelId: new Map(), // ID канала для верификации
-        pendingUsers: new Map(), // Ожидающие верификации пользователи
-        logs: new Map() // Логи верификации
+        enabled: new Collection(),
+        roleId: new Collection(),
+        channelId: new Collection(),
+        type: new Collection(), // 'button' или 'captcha'
+        pendingUsers: new Collection(),
+        logChannel: new Collection(),
+        captchaCodes: new Collection() // Для хранения капч
     },
     stats: {
         bans: 0,
@@ -80,9 +81,9 @@ const antiRaid = {
 };
 
 // ============================================
-// ЗАГРУЗКА КОМАНД ИЗ ПАПКИ
+// ЗАГРУЗКА КОМАНД
 // ============================================
-client.commands = new Map();
+client.commands = new Collection();
 const commandsPath = path.join(__dirname, 'commands');
 
 if (!fs.existsSync(commandsPath)) {
@@ -105,22 +106,67 @@ try {
 }
 
 // ============================================
+// ФУНКЦИЯ ГЕНЕРАЦИИ КАПЧИ
+// ============================================
+function generateCaptcha() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    let captcha = '';
+    for (let i = 0; i < 6; i++) {
+        captcha += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return captcha;
+}
+
+// ============================================
+// ФУНКЦИЯ ЛОГИРОВАНИЯ
+// ============================================
+async function logToChannel(guild, type, user, moderator = null, reason = null) {
+    try {
+        const logChannelId = antiRaid.verification.logChannel.get(guild.id);
+        if (!logChannelId) return;
+        
+        const logChannel = await guild.channels.fetch(logChannelId).catch(() => null);
+        if (!logChannel) return;
+        
+        const embed = new EmbedBuilder()
+            .setColor(type === 'success' ? '#00ff00' : type === 'fail' ? '#ff0000' : '#ffa500')
+            .setTitle(`✅ Верификация - ${type === 'success' ? 'Успех' : type === 'fail' ? 'Неудача' : 'Инфо'}`)
+            .setTimestamp()
+            .addFields(
+                { name: 'Пользователь', value: `${user.tag} (${user.id})`, inline: true }
+            );
+        
+        if (moderator) {
+            embed.addFields({ name: 'Модератор', value: `${moderator.tag} (${moderator.id})`, inline: true });
+        }
+        
+        if (reason) {
+            embed.addFields({ name: 'Причина', value: reason, inline: false });
+        }
+        
+        await logChannel.send({ embeds: [embed] });
+    } catch (error) {
+        console.error('Ошибка при логировании:', error);
+    }
+}
+
+// ============================================
 // ОПРЕДЕЛЕНИЕ СЛЕШ-КОМАНД
 // ============================================
 const slashCommands = [
-    // ===== КОМАНДЫ ANTI-RAID =====
+    // АНТИ-РЕЙД КОМАНДЫ
     new SlashCommandBuilder()
         .setName('antiraid')
         .setDescription('🛡️ Управление анти-рейд защитой')
         .addSubcommand(sub => 
             sub.setName('on')
-                .setDescription('Включить анти-рейд защиту на сервере'))
+                .setDescription('Включить анти-рейд защиту'))
         .addSubcommand(sub => 
             sub.setName('off')
                 .setDescription('Выключить анти-рейд защиту'))
         .addSubcommand(sub => 
             sub.setName('status')
-                .setDescription('Показать текущий статус и настройки защиты'))
+                .setDescription('Показать статус защиты'))
         .addSubcommand(sub =>
             sub.setName('set')
                 .setDescription('Настроить параметры защиты')
@@ -141,18 +187,18 @@ const slashCommands = [
                         .setMaxValue(50))
                 .addIntegerOption(opt =>
                     opt.setName('window')
-                        .setDescription('Временное окно в секундах (1-300)')
+                        .setDescription('Временное окно (1-300 сек)')
                         .setRequired(true)
                         .setMinValue(1)
                         .setMaxValue(300))),
 
-    // ===== КОМАНДЫ ВЕРИФИКАЦИИ =====
+    // КОМАНДЫ ВЕРИФИКАЦИИ
     new SlashCommandBuilder()
         .setName('verify')
         .setDescription('✅ Управление системой верификации')
         .addSubcommand(sub =>
             sub.setName('setup')
-                .setDescription('Настроить систему верификации на сервере')
+                .setDescription('Настроить систему верификации')
                 .addChannelOption(opt =>
                     opt.setName('channel')
                         .setDescription('Канал для верификации')
@@ -167,7 +213,7 @@ const slashCommands = [
                         .setRequired(true)
                         .addChoices(
                             { name: '🔘 Кнопка', value: 'button' },
-                            { name: '✅ Капча', value: 'captcha' }
+                            { name: '🔐 Капча', value: 'captcha' }
                         )))
         .addSubcommand(sub =>
             sub.setName('disable')
@@ -184,64 +230,72 @@ const slashCommands = [
                         .setRequired(true)))
         .addSubcommand(sub =>
             sub.setName('log')
-                .setDescription('Настроить канал для логов верификации')
+                .setDescription('Настроить канал для логов')
                 .addChannelOption(opt =>
                     opt.setName('channel')
                         .setDescription('Канал для логов')
+                        .setRequired(true)))
+        .addSubcommand(sub =>
+            sub.setName('reset')
+                .setDescription('Сбросить верификацию для пользователя')
+                .addUserOption(opt =>
+                    opt.setName('user')
+                        .setDescription('Пользователь')
                         .setRequired(true))),
 
-    // ===== КОМАНДЫ БЭКАПОВ =====
+    // КОМАНДЫ БЭКАПОВ
     new SlashCommandBuilder()
         .setName('backup')
         .setDescription('💾 Управление бэкапами сервера')
         .addSubcommand(sub =>
             sub.setName('create')
-                .setDescription('Создать резервную копию сервера (роли и каналы)'))
+                .setDescription('Создать бэкап сервера'))
         .addSubcommand(sub =>
             sub.setName('list')
-                .setDescription('Показать список всех доступных бэкапов'))
+                .setDescription('Список бэкапов'))
         .addSubcommand(sub =>
             sub.setName('restore')
-                .setDescription('Восстановить сервер из бэкапа')
+                .setDescription('Восстановить из бэкапа')
                 .addStringOption(opt =>
                     opt.setName('backup_id')
                         .setDescription('ID бэкапа (оставьте пустым для последнего)')
                         .setRequired(false))),
 
-    // ===== СЛУЖЕБНЫЕ КОМАНДЫ =====
-    new SlashCommandBuilder()
-        .setName('ping')
-        .setDescription('🏓 Проверка работы бота (показывает задержку)'),
-    
-    new SlashCommandBuilder()
-        .setName('help')
-        .setDescription('📋 Показать список всех доступных команд'),
-    
-    new SlashCommandBuilder()
-        .setName('stats')
-        .setDescription('📊 Показать статистику работы бота'),
-    
+    // КОМАНДЫ МОДЕРАЦИИ
     new SlashCommandBuilder()
         .setName('kick')
-        .setDescription('👢 Кикнуть пользователя (только для админов)')
+        .setDescription('👢 Кикнуть пользователя')
         .addUserOption(opt =>
             opt.setName('user')
-                .setDescription('Пользователь для кика')
+                .setDescription('Пользователь')
                 .setRequired(true))
         .addStringOption(opt =>
             opt.setName('reason')
-                .setDescription('Причина кика')
+                .setDescription('Причина')
                 .setRequired(false)),
     
     new SlashCommandBuilder()
         .setName('clear')
-        .setDescription('🧹 Очистить сообщения в канале (только для админов)')
+        .setDescription('🧹 Очистить сообщения')
         .addIntegerOption(opt =>
             opt.setName('amount')
-                .setDescription('Количество сообщений (1-100)')
+                .setDescription('Количество (1-100)')
                 .setRequired(true)
                 .setMinValue(1)
-                .setMaxValue(100))
+                .setMaxValue(100)),
+
+    // СЛУЖЕБНЫЕ КОМАНДЫ
+    new SlashCommandBuilder()
+        .setName('ping')
+        .setDescription('🏓 Проверка связи'),
+    
+    new SlashCommandBuilder()
+        .setName('stats')
+        .setDescription('📊 Статистика бота'),
+    
+    new SlashCommandBuilder()
+        .setName('help')
+        .setDescription('📋 Список команд')
 ];
 
 // ============================================
@@ -271,7 +325,7 @@ async function registerSlashCommands() {
 }
 
 // ============================================
-// ФУНКЦИЯ ДЛЯ ПОДДЕРЖАНИЯ ЗЕЛЕНОГО СТАТУСА
+// ФУНКЦИЯ ПОДДЕРЖАНИЯ СТАТУСА
 // ============================================
 function keepBotOnline() {
     client.user.setStatus('online');
@@ -309,68 +363,65 @@ function keepBotOnline() {
 }
 
 // ============================================
-// ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ КАПЧИ
-// ============================================
-function generateCaptcha() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-    let captcha = '';
-    for (let i = 0; i < 6; i++) {
-        captcha += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return captcha;
-}
-
-// ============================================
-// ФУНКЦИЯ ДЛЯ ЛОГИРОВАНИЯ ВЕРИФИКАЦИИ
-// ============================================
-async function logVerification(guild, type, user, moderator = null, reason = null) {
-    try {
-        const logChannelId = antiRaid.verification.logs.get(guild.id);
-        if (!logChannelId) return;
-        
-        const logChannel = await guild.channels.fetch(logChannelId);
-        if (!logChannel) return;
-        
-        const embed = new EmbedBuilder()
-            .setColor(type === 'success' ? '#00ff00' : type === 'fail' ? '#ff0000' : '#ffa500')
-            .setTitle(`✅ Верификация - ${type === 'success' ? 'Успех' : type === 'fail' ? 'Неудача' : 'Инфо'}`)
-            .setTimestamp()
-            .addFields(
-                { name: 'Пользователь', value: `${user.tag} (${user.id})`, inline: true }
-            );
-        
-        if (moderator) {
-            embed.addFields({ name: 'Модератор', value: `${moderator.tag} (${moderator.id})`, inline: true });
-        }
-        
-        if (reason) {
-            embed.addFields({ name: 'Причина', value: reason, inline: false });
-        }
-        
-        await logChannel.send({ embeds: [embed] });
-    } catch (error) {
-        console.error('Ошибка при логировании:', error);
-    }
-}
-
-// ============================================
 // ОБРАБОТКА НОВЫХ УЧАСТНИКОВ (ВЕРИФИКАЦИЯ)
 // ============================================
 client.on('guildMemberAdd', async (member) => {
     const guildId = member.guild.id;
     
-    // Проверяем включена ли верификация
+    // Анти-рейд защита (отслеживание массовых заходов) [citation:7]
+    if (antiRaid.enabled.get(guildId)) {
+        antiRaid.stats.joinsTracked++;
+
+        const settings = antiRaid.settings.get(guildId) || { joinThreshold: 5, joinWindow: 10 };
+        const now = Date.now();
+        
+        if (!antiRaid.joinCache.has(guildId)) {
+            antiRaid.joinCache.set(guildId, []);
+        }
+
+        const joinCache = antiRaid.joinCache.get(guildId);
+        joinCache.push({ userId: member.id, timestamp: now });
+
+        const filtered = joinCache.filter(entry => now - entry.timestamp < settings.joinWindow * 1000);
+        antiRaid.joinCache.set(guildId, filtered);
+
+        if (filtered.length >= settings.joinThreshold) {
+            antiRaid.stats.raidsDetected++;
+            console.log(`🚨 МАССОВЫЙ ЗАХОД на ${member.guild.name} (${filtered.length} за ${settings.joinWindow} сек)`);
+            
+            try {
+                await member.guild.setVerificationLevel(3); // Повышаем уровень проверки [citation:10]
+                
+                // Баним подозрительные аккаунты (младше 1 дня)
+                const oneDay = 24 * 60 * 60 * 1000;
+                const accountAge = now - member.user.createdTimestamp;
+                if (accountAge < oneDay) {
+                    await member.ban({ reason: 'Анти-рейд: подозрительный аккаунт (младше 1 дня)' });
+                    antiRaid.stats.bans++;
+                }
+            } catch (error) {
+                console.error('Ошибка при защите:', error.message);
+            }
+        }
+    }
+    
+    // Верификация [citation:3][citation:6]
     if (antiRaid.verification.enabled.get(guildId)) {
         const verifyChannelId = antiRaid.verification.channelId.get(guildId);
-        if (!verifyChannelId) return;
+        const verifyRoleId = antiRaid.verification.roleId.get(guildId);
+        const verifyType = antiRaid.verification.type.get(guildId) || 'button';
         
-        const verifyChannel = await member.guild.channels.fetch(verifyChannelId);
+        if (!verifyChannelId || !verifyRoleId) return;
+        
+        const verifyChannel = await member.guild.channels.fetch(verifyChannelId).catch(() => null);
         if (!verifyChannel) return;
         
-        const verifyType = antiRaid.verification.type?.get(guildId) || 'button';
+        // Проверяем, не верифицирован ли уже пользователь
+        const verifyRole = member.guild.roles.cache.get(verifyRoleId);
+        if (verifyRole && member.roles.cache.has(verifyRoleId)) return;
         
         if (verifyType === 'button') {
-            // Кнопочная верификация
+            // Кнопочная верификация [citation:3]
             const row = new ActionRowBuilder()
                 .addComponents(
                     new ButtonBuilder()
@@ -383,7 +434,7 @@ client.on('guildMemberAdd', async (member) => {
             const embed = new EmbedBuilder()
                 .setColor('#0099ff')
                 .setTitle('✅ Верификация')
-                .setDescription(`${member.user}, добро пожаловать на сервер!\n\nНажмите на кнопку ниже, чтобы пройти верификацию и получить доступ к серверу.`)
+                .setDescription(`${member.user}, добро пожаловать на сервер!\n\nНажмите на кнопку ниже, чтобы пройти верификацию и получить доступ.`)
                 .setFooter({ text: 'Anti-Raid Bot' })
                 .setTimestamp();
             
@@ -393,72 +444,53 @@ client.on('guildMemberAdd', async (member) => {
                 components: [row] 
             });
             
-            // Добавляем пользователя в список ожидающих
+            // Сохраняем в ожидающих
             if (!antiRaid.verification.pendingUsers.has(guildId)) {
-                antiRaid.verification.pendingUsers.set(guildId, new Map());
+                antiRaid.verification.pendingUsers.set(guildId, new Collection());
             }
             const pending = antiRaid.verification.pendingUsers.get(guildId);
             pending.set(member.id, {
                 userId: member.id,
                 joinedAt: Date.now(),
-                verified: false
+                verified: false,
+                type: 'button'
             });
             
         } else if (verifyType === 'captcha') {
-            // Капча верификация
+            // Капча верификация [citation:3]
             const captcha = generateCaptcha();
             
-            // Сохраняем капчу для пользователя
+            // Сохраняем капчу
+            if (!antiRaid.verification.captchaCodes.has(guildId)) {
+                antiRaid.verification.captchaCodes.set(guildId, new Collection());
+            }
+            const captchas = antiRaid.verification.captchaCodes.get(guildId);
+            captchas.set(member.id, {
+                code: captcha,
+                attempts: 0,
+                expires: Date.now() + 5 * 60 * 1000 // 5 минут
+            });
+            
+            // Сохраняем в ожидающих
             if (!antiRaid.verification.pendingUsers.has(guildId)) {
-                antiRaid.verification.pendingUsers.set(guildId, new Map());
+                antiRaid.verification.pendingUsers.set(guildId, new Collection());
             }
             const pending = antiRaid.verification.pendingUsers.get(guildId);
             pending.set(member.id, {
                 userId: member.id,
                 joinedAt: Date.now(),
-                captcha: captcha,
-                attempts: 0,
-                verified: false
+                verified: false,
+                type: 'captcha'
             });
             
             const embed = new EmbedBuilder()
                 .setColor('#0099ff')
                 .setTitle('🔐 Верификация по капче')
-                .setDescription(`${member.user}, добро пожаловать на сервер!\n\nДля верификации введите код ниже в этом канале:\n\`\`\`${captcha}\`\`\`\n*Код действителен 5 минут*`)
+                .setDescription(`${member.user}, добро пожаловать на сервер!\n\nДля верификации введите код ниже в этом канале:\n\`\`\`${captcha}\`\`\`\n*Код действителен 5 минут. У вас есть 3 попытки.*`)
                 .setFooter({ text: 'Anti-Raid Bot' })
                 .setTimestamp();
             
             await verifyChannel.send({ content: `${member.user}`, embeds: [embed] });
-        }
-    }
-    
-    // Анти-рейд защита (как и раньше)
-    if (!antiRaid.enabled.get(guildId)) return;
-
-    antiRaid.stats.joinsTracked++;
-
-    const settings = antiRaid.settings.get(guildId) || { joinThreshold: 5, joinWindow: 10 };
-    const now = Date.now();
-    
-    if (!antiRaid.joinCache.has(guildId)) {
-        antiRaid.joinCache.set(guildId, []);
-    }
-
-    const joinCache = antiRaid.joinCache.get(guildId);
-    joinCache.push({ userId: member.id, timestamp: now });
-
-    const filtered = joinCache.filter(entry => now - entry.timestamp < settings.joinWindow * 1000);
-    antiRaid.joinCache.set(guildId, filtered);
-
-    if (filtered.length >= settings.joinThreshold) {
-        antiRaid.stats.raidsDetected++;
-        console.log(`🚨 МАССОВЫЙ ЗАХОД на ${member.guild.name} (${filtered.length} за ${settings.joinWindow} сек)`);
-        
-        try {
-            await member.guild.setVerificationLevel(3);
-            console.log(`✅ Уровень проверки повышен для ${member.guild.name}`);
-        } catch (error) {
-            console.error('Ошибка при защите:', error.message);
         }
     }
 });
@@ -508,7 +540,7 @@ client.on('interactionCreate', async (interaction) => {
                 
                 antiRaid.stats.verifiedUsers++;
                 
-                await logVerification(interaction.guild, 'success', interaction.user);
+                await logToChannel(interaction.guild, 'success', interaction.user);
                 
                 await interaction.reply({ 
                     content: '✅ **Верификация пройдена успешно!** Теперь у вас есть доступ к серверу.', 
@@ -532,7 +564,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const { commandName, options, guild, member, user, channel } = interaction;
 
-    // Проверка прав для команд управления
+    // Проверка прав для админ-команд
     const adminCommands = ['antiraid', 'backup', 'verify', 'kick', 'clear'];
     if (adminCommands.includes(commandName)) {
         if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -557,11 +589,12 @@ client.on('interactionCreate', async (interaction) => {
             '• `/verify disable` - Отключить верификацию\n' +
             '• `/verify status` - Статус верификации\n' +
             '• `/verify check` - Проверить пользователя\n' +
-            '• `/verify log` - Настроить канал логов\n\n' +
-            '## 💾 **Бэкапы сервера**\n' +
+            '• `/verify log` - Настроить канал логов\n' +
+            '• `/verify reset` - Сбросить верификацию\n\n' +
+            '## 💾 **Бэкапы**\n' +
             '• `/backup create` - Создать бэкап\n' +
             '• `/backup list` - Список бэкапов\n' +
-            '• `/backup restore` - Восстановить из бэкапа\n\n' +
+            '• `/backup restore` - Восстановить\n\n' +
             '## ⚙️ **Модерация**\n' +
             '• `/kick` - Кикнуть пользователя\n' +
             '• `/clear` - Очистить сообщения\n\n' +
@@ -579,9 +612,27 @@ client.on('interactionCreate', async (interaction) => {
         const latency = Date.now() - interaction.createdTimestamp;
         const apiLatency = client.ws.ping;
         return interaction.reply(
-            `🏓 **Понг!**\n` +
+            `🏓 **Понг!** Бот работает 24/7 на Railway\n` +
             `⏱️ Задержка бота: ${latency}ms\n` +
             `📡 Задержка API: ${apiLatency}ms`
+        );
+    }
+
+    // ===== КОМАНДА /STATS =====
+    if (commandName === 'stats') {
+        const uptime = Math.floor((Date.now() - antiRaid.stats.startTime) / 1000);
+        const hours = Math.floor(uptime / 3600);
+        const minutes = Math.floor((uptime % 3600) / 60);
+        
+        return interaction.reply(
+            `📊 **Статистика бота**\n\n` +
+            `🕐 **Аптайм:** ${hours}ч ${minutes}м\n` +
+            `🛡️ **Серверов:** ${client.guilds.cache.size}\n` +
+            `👥 **Пользователей:** ${client.users.cache.size}\n` +
+            `🚨 **Рейдов обнаружено:** ${antiRaid.stats.raidsDetected}\n` +
+            `🔨 **Нарушителей забанено:** ${antiRaid.stats.bans}\n` +
+            `✅ **Верифицировано:** ${antiRaid.stats.verifiedUsers}\n` +
+            `👀 **Заходов отслежено:** ${antiRaid.stats.joinsTracked}`
         );
     }
 
@@ -602,11 +653,9 @@ client.on('interactionCreate', async (interaction) => {
         try {
             await targetMember.kick(reason);
             await interaction.reply(`✅ **Пользователь ${targetUser.tag} кикнут**\nПричина: ${reason}`);
-            
-            await logVerification(guild, 'info', targetUser, user, `Кикнут: ${reason}`);
         } catch (error) {
             await interaction.reply({ 
-                content: '❌ Ошибка при кике пользователя', 
+                content: '❌ Ошибка при кике', 
                 ephemeral: true 
             });
         }
@@ -625,28 +674,10 @@ client.on('interactionCreate', async (interaction) => {
             });
         } catch (error) {
             await interaction.reply({ 
-                content: '❌ Ошибка при очистке сообщений', 
+                content: '❌ Ошибка при очистке', 
                 ephemeral: true 
             });
         }
-    }
-
-    // ===== КОМАНДА /STATS =====
-    if (commandName === 'stats') {
-        const uptime = Math.floor((Date.now() - antiRaid.stats.startTime) / 1000);
-        const hours = Math.floor(uptime / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        
-        return interaction.reply(
-            `📊 **Статистика бота**\n\n` +
-            `🕐 **Аптайм:** ${hours}ч ${minutes}м\n` +
-            `🛡️ **Серверов:** ${client.guilds.cache.size}\n` +
-            `👥 **Пользователей:** ${client.users.cache.size}\n` +
-            `🚨 **Рейдов обнаружено:** ${antiRaid.stats.raidsDetected}\n` +
-            `🔨 **Нарушителей забанено:** ${antiRaid.stats.bans}\n` +
-            `✅ **Пользователей верифицировано:** ${antiRaid.stats.verifiedUsers}\n` +
-            `👀 **Заходов отслежено:** ${antiRaid.stats.joinsTracked}`
-        );
     }
 
     // ===== КОМАНДА /VERIFY =====
@@ -659,7 +690,7 @@ client.on('interactionCreate', async (interaction) => {
             const verifyRole = options.getRole('role');
             const verifyType = options.getString('type');
 
-            if (verifyChannel.type !== 0) { // 0 = текстовый канал
+            if (verifyChannel.type !== 0) {
                 return interaction.reply({ 
                     content: '❌ Канал должен быть текстовым!', 
                     ephemeral: true 
@@ -674,7 +705,7 @@ client.on('interactionCreate', async (interaction) => {
             const setupEmbed = new EmbedBuilder()
                 .setColor('#00ff00')
                 .setTitle('✅ Система верификации настроена')
-                .setDescription(`Система верификации успешно настроена на сервере!`)
+                .setDescription(`Система верификации успешно настроена!`)
                 .addFields(
                     { name: '📝 Канал', value: `${verifyChannel}`, inline: true },
                     { name: '🎭 Роль', value: `${verifyRole}`, inline: true },
@@ -685,13 +716,13 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.reply({ embeds: [setupEmbed] });
 
-            // Отправляем тестовое сообщение в канал верификации
+            // Отправляем приветственное сообщение в канал верификации
             if (verifyType === 'button') {
                 const row = new ActionRowBuilder()
                     .addComponents(
                         new ButtonBuilder()
                             .setCustomId('verify_test')
-                            .setLabel('✅ Пройти верификацию')
+                            .setLabel('✅ Пример кнопки')
                             .setStyle(ButtonStyle.Success)
                             .setEmoji('✅')
                             .setDisabled(true)
@@ -704,6 +735,14 @@ client.on('interactionCreate', async (interaction) => {
                     .setFooter({ text: 'Anti-Raid Bot' });
 
                 await verifyChannel.send({ embeds: [testEmbed], components: [row] });
+            } else {
+                const testEmbed = new EmbedBuilder()
+                    .setColor('#0099ff')
+                    .setTitle('🔐 Верификация настроена')
+                    .setDescription(`Система верификации готова к работе!\nНовые участники будут получать роль ${verifyRole} после ввода правильного кода.`)
+                    .setFooter({ text: 'Anti-Raid Bot' });
+
+                await verifyChannel.send({ embeds: [testEmbed] });
             }
 
         } else if (subcommand === 'disable') {
@@ -712,6 +751,7 @@ client.on('interactionCreate', async (interaction) => {
             antiRaid.verification.roleId.delete(guildId);
             antiRaid.verification.type.delete(guildId);
             antiRaid.verification.pendingUsers.delete(guildId);
+            antiRaid.verification.captchaCodes.delete(guildId);
 
             await interaction.reply('✅ **Система верификации отключена**');
 
@@ -738,22 +778,26 @@ client.on('interactionCreate', async (interaction) => {
 
         } else if (subcommand === 'check') {
             const targetUser = options.getUser('user');
-            const targetMember = await guild.members.fetch(targetUser.id);
+            const targetMember = await guild.members.fetch(targetUser.id).catch(() => null);
             
-            const roleId = antiRaid.verification.roleId.get(guildId);
-            if (!roleId) {
+            if (!targetMember) {
                 return interaction.reply({ 
-                    content: '❌ Роль для верификации не настроена', 
+                    content: '❌ Пользователь не найден на сервере', 
                     ephemeral: true 
                 });
             }
             
-            const hasRole = targetMember.roles.cache.has(roleId);
+            const roleId = antiRaid.verification.roleId.get(guildId);
+            const hasRole = roleId ? targetMember.roles.cache.has(roleId) : false;
+            
+            const pending = antiRaid.verification.pendingUsers.get(guildId);
+            const isPending = pending ? pending.has(targetUser.id) : false;
             
             await interaction.reply(
                 `## ✅ **Проверка пользователя**\n\n` +
                 `**Пользователь:** ${targetUser.tag}\n` +
-                `**Статус:** ${hasRole ? '✅ Верифицирован' : '❌ Не верифицирован'}\n`
+                `**Статус:** ${hasRole ? '✅ Верифицирован' : '❌ Не верифицирован'}\n` +
+                `**В ожидании:** ${isPending ? '✅ Да' : '❌ Нет'}\n`
             );
 
         } else if (subcommand === 'log') {
@@ -761,16 +805,15 @@ client.on('interactionCreate', async (interaction) => {
             
             if (logChannel.type !== 0) {
                 return interaction.reply({ 
-                    content: '❌ Канал для логов должен быть текстовым!', 
+                    content: '❌ Канал должен быть текстовым!', 
                     ephemeral: true 
                 });
             }
             
-            antiRaid.verification.logs.set(guildId, logChannel.id);
+            antiRaid.verification.logChannel.set(guildId, logChannel.id);
             
-            await interaction.reply(`✅ **Канал для логов верификации установлен:** ${logChannel}`);
+            await interaction.reply(`✅ **Канал для логов установлен:** ${logChannel}`);
             
-            // Отправляем тестовое сообщение в канал логов
             const testEmbed = new EmbedBuilder()
                 .setColor('#00ff00')
                 .setTitle('✅ Канал логов настроен')
@@ -779,6 +822,23 @@ client.on('interactionCreate', async (interaction) => {
                 .setTimestamp();
             
             await logChannel.send({ embeds: [testEmbed] });
+
+        } else if (subcommand === 'reset') {
+            const targetUser = options.getUser('user');
+            
+            // Удаляем из ожидающих
+            const pending = antiRaid.verification.pendingUsers.get(guildId);
+            if (pending) {
+                pending.delete(targetUser.id);
+            }
+            
+            // Удаляем капчу
+            const captchas = antiRaid.verification.captchaCodes.get(guildId);
+            if (captchas) {
+                captchas.delete(targetUser.id);
+            }
+            
+            await interaction.reply(`✅ **Верификация сброшена для пользователя ${targetUser.tag}**`);
         }
     }
 
@@ -790,11 +850,11 @@ client.on('interactionCreate', async (interaction) => {
         switch (subcommand) {
             case 'on':
                 antiRaid.enabled.set(guildId, true);
-                return interaction.reply('✅ **Анти-рейд защита включена**\nТеперь я отслеживаю подозрительную активность!');
+                return interaction.reply('✅ **Анти-рейд защита включена**');
 
             case 'off':
                 antiRaid.enabled.set(guildId, false);
-                return interaction.reply('✅ **Анти-рейд защита выключена**\nВы можете включить её снова командой `/antiraid on`');
+                return interaction.reply('✅ **Анти-рейд защита выключена**');
 
             case 'status':
                 const settings = antiRaid.settings.get(guildId) || {
@@ -804,7 +864,7 @@ client.on('interactionCreate', async (interaction) => {
                 };
                 const status = antiRaid.enabled.get(guildId) ? '✅ Включена' : '❌ Выключена';
                 
-                let statusMessage = 
+                return interaction.reply(
                     `## 📊 **Статус защиты сервера**\n\n` +
                     `**Общий статус:** ${status}\n\n` +
                     `### 👥 **Массовые заходы**\n` +
@@ -815,9 +875,8 @@ client.on('interactionCreate', async (interaction) => {
                     `*При превышении: автоматический бан*\n\n` +
                     `### 📺 **Действия с каналами**\n` +
                     `Порог: ${settings.channelThreshold} за ${settings.channelWindow} сек\n` +
-                    `*При превышении: автоматический бан*`;
-                
-                return interaction.reply(statusMessage);
+                    `*При превышении: автоматический бан*`
+                );
 
             case 'set':
                 const type = options.getString('type');
@@ -851,21 +910,18 @@ client.on('interactionCreate', async (interaction) => {
         const subcommand = options.getSubcommand();
         
         if (subcommand === 'create') {
-            await interaction.reply('🔄 **Создание бэкапа...**\nЭто может занять несколько секунд');
+            await interaction.reply('🔄 **Создание бэкапа...**');
             
             try {
                 const backup = await createBackup(guild);
-                setTimeout(() => {
-                    interaction.editReply(
-                        `✅ **Бэкап успешно создан!**\n` +
-                        `📁 ID: ${backup.id}\n` +
-                        `👑 Ролей сохранено: ${backup.roles.length}\n` +
-                        `📺 Каналов сохранено: ${backup.channels.length}\n` +
-                        `📅 Дата: ${new Date(backup.timestamp).toLocaleString()}`
-                    );
-                }, 2000);
+                await interaction.editReply(
+                    `✅ **Бэкап успешно создан!**\n` +
+                    `📁 ID: ${backup.id}\n` +
+                    `👑 Ролей: ${backup.roles.length}\n` +
+                    `📺 Каналов: ${backup.channels.length}`
+                );
             } catch (error) {
-                interaction.editReply('❌ **Ошибка при создании бэкапа**\n' + error.message);
+                await interaction.editReply('❌ **Ошибка при создании бэкапа**');
             }
             
         } else if (subcommand === 'list') {
@@ -876,11 +932,11 @@ client.on('interactionCreate', async (interaction) => {
                     .reverse();
                 
                 if (files.length === 0) {
-                    return interaction.reply('📭 **Нет доступных бэкапов**\nСоздайте первый бэкап командой `/backup create`');
+                    return interaction.reply('📭 **Нет доступных бэкапов**');
                 }
 
                 let response = '## 📋 **Список бэкапов**\n\n';
-                files.slice(0, 10).forEach((file, index) => {
+                files.slice(0, 5).forEach((file, index) => {
                     try {
                         const data = JSON.parse(fs.readFileSync(`./backups/${file}`));
                         const date = new Date(data.timestamp).toLocaleString();
@@ -891,14 +947,9 @@ client.on('interactionCreate', async (interaction) => {
                     } catch (e) {}
                 });
                 
-                if (files.length > 10) {
-                    response += `*...и ещё ${files.length - 10} бэкапов*\n`;
-                }
-                response += '\nДля восстановления используйте: `/backup restore backup_id:ID`';
-                
                 return interaction.reply(response);
             } catch (error) {
-                return interaction.reply('❌ **Ошибка при получении списка бэкапов**\n' + error.message);
+                return interaction.reply('❌ **Ошибка при получении списка**');
             }
             
         } else if (subcommand === 'restore') {
@@ -910,19 +961,17 @@ client.on('interactionCreate', async (interaction) => {
                 await owner.send(
                     `## ⚠️ **Запрос на восстановление сервера**\n\n` +
                     `**Сервер:** ${guild.name}\n` +
-                    `**ID сервера:** ${guild.id}\n` +
-                    `**Запросил:** ${user.tag} (${user.id})\n` +
+                    `**Запросил:** ${user.tag}\n` +
                     `**Бэкап:** ${backupId || 'последний'}\n\n` +
-                    `Для подтверждения восстановления напишите: \`!confirm restore\`\n` +
-                    `Для отмены: \`!cancel restore\``
+                    `Для подтверждения напишите: \`!confirm restore\``
                 );
                 
                 await interaction.reply({ 
-                    content: '📬 **Запрос отправлен владельцу сервера**\nОжидайте подтверждения в личных сообщениях', 
+                    content: '📬 **Запрос отправлен владельцу сервера**', 
                     ephemeral: true 
                 });
             } catch (error) {
-                return interaction.reply('❌ **Не удалось отправить запрос владельцу**\n' + error.message);
+                return interaction.reply('❌ **Не удалось отправить запрос**');
             }
         }
     }
@@ -937,22 +986,39 @@ client.on('messageCreate', async (message) => {
     const guildId = message.guild?.id;
     if (!guildId) return;
     
-    // Проверка капчи
+    // Проверка капчи [citation:3]
     if (antiRaid.verification.enabled.get(guildId)) {
         const verifyChannelId = antiRaid.verification.channelId.get(guildId);
         if (message.channel.id === verifyChannelId) {
+            // Проверяем, есть ли пользователь в ожидающих
             const pending = antiRaid.verification.pendingUsers.get(guildId);
             if (pending && pending.has(message.author.id)) {
                 const userData = pending.get(message.author.id);
                 
-                if (userData.captcha && !userData.verified) {
-                    const now = Date.now();
-                    if (now - userData.joinedAt > 5 * 60 * 1000) {
-                        pending.delete(message.author.id);
-                        return message.reply('❌ Время для верификации истекло. Зайдите заново.');
+                // Проверяем тип верификации
+                if (userData.type === 'captcha') {
+                    // Получаем капчу
+                    const captchas = antiRaid.verification.captchaCodes.get(guildId);
+                    if (!captchas || !captchas.has(message.author.id)) {
+                        return;
                     }
                     
-                    if (message.content === userData.captcha) {
+                    const captchaData = captchas.get(message.author.id);
+                    
+                    // Проверяем срок действия
+                    if (Date.now() > captchaData.expires) {
+                        pending.delete(message.author.id);
+                        captchas.delete(message.author.id);
+                        await message.reply('❌ Время для верификации истекло. Зайдите заново.').then(msg => {
+                            setTimeout(() => msg.delete().catch(() => {}), 5000);
+                        });
+                        await message.delete().catch(() => {});
+                        return;
+                    }
+                    
+                    // Проверяем код
+                    if (message.content === captchaData.code) {
+                        // Успешная верификация
                         const roleId = antiRaid.verification.roleId.get(guildId);
                         if (roleId) {
                             const role = message.guild.roles.cache.get(roleId);
@@ -962,10 +1028,13 @@ client.on('messageCreate', async (message) => {
                                     userData.verified = true;
                                     antiRaid.stats.verifiedUsers++;
                                     pending.delete(message.author.id);
+                                    captchas.delete(message.author.id);
                                     
-                                    await logVerification(message.guild, 'success', message.author);
+                                    await logToChannel(message.guild, 'success', message.author);
                                     
-                                    await message.reply('✅ **Верификация пройдена успешно!**');
+                                    await message.reply('✅ **Верификация пройдена успешно!**').then(msg => {
+                                        setTimeout(() => msg.delete().catch(() => {}), 5000);
+                                    });
                                     await message.delete().catch(() => {});
                                 } catch (error) {
                                     await message.reply('❌ Ошибка при выдаче роли');
@@ -973,14 +1042,22 @@ client.on('messageCreate', async (message) => {
                             }
                         }
                     } else {
-                        userData.attempts = (userData.attempts || 0) + 1;
-                        if (userData.attempts >= 3) {
+                        // Неверный код
+                        captchaData.attempts++;
+                        
+                        if (captchaData.attempts >= 3) {
+                            // Превышено количество попыток
                             pending.delete(message.author.id);
-                            await message.reply('❌ Слишком много попыток. Зайдите заново.');
+                            captchas.delete(message.author.id);
+                            await message.reply('❌ Слишком много попыток. Зайдите заново.').then(msg => {
+                                setTimeout(() => msg.delete().catch(() => {}), 5000);
+                            });
                             
-                            await logVerification(message.guild, 'fail', message.author, null, 'Превышено количество попыток');
+                            await logToChannel(message.guild, 'fail', message.author, null, 'Превышено количество попыток');
                         } else {
-                            await message.reply(`❌ Неверный код. Осталось попыток: ${3 - userData.attempts}`);
+                            await message.reply(`❌ Неверный код. Осталось попыток: ${3 - captchaData.attempts}`).then(msg => {
+                                setTimeout(() => msg.delete().catch(() => {}), 3000);
+                            });
                         }
                         await message.delete().catch(() => {});
                     }
@@ -995,94 +1072,20 @@ client.on('messageCreate', async (message) => {
     const args = message.content.slice(PREFIX.length).trim().split(/ +/);
     const commandName = args.shift().toLowerCase();
 
-    if (commandName === 'antiraid') {
-        const sub = args[0];
-        const guildId = message.guild.id;
-
-        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-            return message.reply('❌ У вас нет прав администратора');
-        }
-
-        if (sub === 'help') {
-            return message.reply(
-                '**!antiraid команды:**\n' +
-                '`!antiraid on` - включить защиту\n' +
-                '`!antiraid off` - выключить защиту\n' +
-                '`!antiraid status` - статус защиты\n' +
-                '`!antiraid set joins 5 10` - порог заходов\n' +
-                '`!antiraid set roles 3 5` - порог ролей\n' +
-                '`!antiraid set channels 3 5` - порог каналов'
-            );
-        }
-
-        if (sub === 'on') {
-            antiRaid.enabled.set(guildId, true);
-            return message.reply('✅ Анти-рейд защита включена');
-        }
-
-        if (sub === 'off') {
-            antiRaid.enabled.set(guildId, false);
-            return message.reply('✅ Анти-рейд защита выключена');
-        }
-
-        if (sub === 'status') {
-            const settings = antiRaid.settings.get(guildId) || {
-                joinThreshold: 5, joinWindow: 10,
-                roleThreshold: 3, roleWindow: 5,
-                channelThreshold: 3, channelWindow: 5
-            };
-            const status = antiRaid.enabled.get(guildId) ? '✅ Включена' : '❌ Выключена';
-            return message.reply(
-                `**Статус защиты:** ${status}\n` +
-                `👥 Заходы: ${settings.joinThreshold} за ${settings.joinWindow} сек\n` +
-                `👑 Роли: ${settings.roleThreshold} за ${settings.roleWindow} сек\n` +
-                `📺 Каналы: ${settings.channelThreshold} за ${settings.channelWindow} сек`
-            );
-        }
-
-        if (sub === 'set') {
-            const type = args[0];
-            const threshold = parseInt(args[1]);
-            const window = parseInt(args[2]);
-
-            if (!type || isNaN(threshold) || isNaN(window)) {
-                return message.reply('❌ Использование: !antiraid set <joins/roles/channels> <число> <секунды>');
-            }
-
-            const newSettings = antiRaid.settings.get(guildId) || {};
-            
-            if (type === 'joins') {
-                newSettings.joinThreshold = threshold;
-                newSettings.joinWindow = window;
-                message.reply(`✅ Порог массовых заходов: ${threshold} за ${window} сек`);
-            } else if (type === 'roles') {
-                newSettings.roleThreshold = threshold;
-                newSettings.roleWindow = window;
-                message.reply(`✅ Порог действий с ролями: ${threshold} за ${window} сек`);
-            } else if (type === 'channels') {
-                newSettings.channelThreshold = threshold;
-                newSettings.channelWindow = window;
-                message.reply(`✅ Порог действий с каналами: ${threshold} за ${window} сек`);
-            } else {
-                return message.reply('❌ Неверный тип. Используйте: joins, roles, channels');
-            }
-            
-            antiRaid.settings.set(guildId, newSettings);
-        }
+    if (commandName === 'antiraid' && args[0] === 'help') {
+        message.reply('Используйте `/help` для списка всех команд');
     }
-
+    
     if (commandName === 'confirm' && args[0] === 'restore') {
-        // Здесь логика подтверждения восстановления владельцем
-        message.reply('✅ Восстановление подтверждено! Начинаю процесс...');
-    }
-
-    if (commandName === 'cancel' && args[0] === 'restore') {
-        message.reply('❌ Восстановление отменено');
+        if (message.author.id !== message.guild.ownerId) {
+            return message.reply('❌ Только владелец сервера может подтвердить восстановление');
+        }
+        message.reply('✅ Восстановление подтверждено! Функция в разработке.');
     }
 });
 
 // ============================================
-// ЗАЩИТА ОТ ДЕЙСТВИЙ С РОЛЯМИ
+// ЗАЩИТА ОТ ДЕЙСТВИЙ С РОЛЯМИ [citation:7]
 // ============================================
 client.on('guildRoleCreate', async (role) => {
     await checkRoleAction(role.guild, 'create');
@@ -1090,10 +1093,6 @@ client.on('guildRoleCreate', async (role) => {
 
 client.on('guildRoleDelete', async (role) => {
     await checkRoleAction(role.guild, 'delete');
-});
-
-client.on('guildRoleUpdate', async (oldRole, newRole) => {
-    await checkRoleAction(newRole.guild, 'update');
 });
 
 async function checkRoleAction(guild, action) {
@@ -1105,7 +1104,7 @@ async function checkRoleAction(guild, action) {
     try {
         const auditLogs = await guild.fetchAuditLogs({ 
             limit: 1, 
-            type: action === 'create' ? 30 : action === 'delete' ? 32 : 31 
+            type: action === 'create' ? 30 : 32 
         });
         
         const log = auditLogs.entries.first();
@@ -1114,7 +1113,7 @@ async function checkRoleAction(guild, action) {
         const now = Date.now();
         
         if (!antiRaid.actionCache.has(guildId)) {
-            antiRaid.actionCache.set(guildId, new Map());
+            antiRaid.actionCache.set(guildId, new Collection());
         }
 
         const userCache = antiRaid.actionCache.get(guildId);
@@ -1135,7 +1134,6 @@ async function checkRoleAction(guild, action) {
                     reason: `Анти-рейд: ${userActions.roles.length} действий с ролями` 
                 });
                 antiRaid.stats.bans++;
-                console.log(`✅ Нарушитель забанен: ${log.executor.tag}`);
             } catch (e) {
                 console.error('Не удалось забанить:', e.message);
             }
@@ -1174,7 +1172,7 @@ async function checkChannelAction(guild, action) {
         const now = Date.now();
         
         if (!antiRaid.actionCache.has(guildId)) {
-            antiRaid.actionCache.set(guildId, new Map());
+            antiRaid.actionCache.set(guildId, new Collection());
         }
 
         const userCache = antiRaid.actionCache.get(guildId);
@@ -1195,7 +1193,6 @@ async function checkChannelAction(guild, action) {
                     reason: `Анти-рейд: ${userActions.channels.length} действий с каналами` 
                 });
                 antiRaid.stats.bans++;
-                console.log(`✅ Нарушитель забанен: ${log.executor.tag}`);
             } catch (e) {
                 console.error('Не удалось забанить:', e.message);
             }
@@ -1222,10 +1219,8 @@ async function createBackup(guild) {
             backup.roles.push({
                 name: role.name,
                 color: role.color,
-                hoist: role.hoist,
                 permissions: role.permissions.bitfield.toString(),
-                position: role.position,
-                mentionable: role.mentionable
+                position: role.position
             });
         }
     });
@@ -1235,10 +1230,7 @@ async function createBackup(guild) {
             name: channel.name,
             type: channel.type,
             position: channel.position,
-            parentId: channel.parentId,
-            topic: channel.topic,
-            nsfw: channel.nsfw,
-            rateLimitPerUser: channel.rateLimitPerUser
+            parentId: channel.parentId
         });
     });
 
@@ -1258,7 +1250,7 @@ async function createBackup(guild) {
 // ============================================
 client.once('ready', async () => {
     console.log(`=================================`);
-    console.log(`✅ БОТ УСПЕШНО ЗАПУЩЕН!`);
+    console.log(`✅ БОТ УСПЕШНО ЗАПУЩЕН НА RAILWAY!`);
     console.log(`=================================`);
     console.log(`📊 Информация:`);
     console.log(`   Имя бота: ${client.user.tag}`);
@@ -1271,14 +1263,13 @@ client.once('ready', async () => {
     keepBotOnline();
     
     console.log(`📋 Команды:`);
-    console.log(`   /antiraid - управление защитой`);
-    console.log(`   /verify - система верификации`);
-    console.log(`   /backup - управление бэкапами`);
-    console.log(`   /kick - кик пользователя`);
-    console.log(`   /clear - очистка сообщений`);
-    console.log(`   /ping - проверка связи`);
-    console.log(`   /stats - статистика`);
-    console.log(`   /help - список команд`);
+    console.log(`   /antiraid - защита от рейдов`);
+    console.log(`   /verify - верификация`);
+    console.log(`   /backup - бэкапы`);
+    console.log(`   /kick, /clear - модерация`);
+    console.log(`   /ping, /stats, /help`);
+    console.log(`=================================`);
+    console.log(`⏱️ Railway 24/7: бот работает постоянно`);
     console.log(`=================================`);
 });
 
@@ -1286,13 +1277,8 @@ process.on('unhandledRejection', (error) => {
     console.error('❌ Необработанная ошибка:', error);
 });
 
-process.on('uncaughtException', (error) => {
-    console.error('❌ Непойманное исключение:', error);
-});
-
-console.log('🔄 Запуск Anti-Raid бота...');
+console.log('🔄 Запуск Anti-Raid бота на Railway...');
 console.log(`🕐 Время: ${new Date().toLocaleString()}`);
-console.log(`📦 Node.js версия: ${process.version}`);
 
 client.login(BOT_TOKEN).catch(error => {
     console.error('❌ Ошибка при входе в Discord:', error.message);
